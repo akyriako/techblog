@@ -1,0 +1,426 @@
+---
+title: "Cross-Cluster Leader Election for Kubernetes Workloads"
+description: "Kubernetes-native leader election across multiple clusters using PostgreSQL and client-go."
+publishDate: 2026-04-11
+tags: [kubernetes, postgresql, golang, distributed-systems]
+comment: false
+heroImage:
+  src: "./thumbnail.jpg"
+  alt: "Leader Election, Across the Cluster-Verse"
+---
+
+This article explores how to achieve cross-cluster leader election for Kubernetes workloads using PostgreSQL as a backend instead of the Kubernetes API. By plugging a custom database-backed lock into the [client-go leader election module](https://github.com/kubernetes/client-go/tree/master/tools/leaderelection), multiple instances even across different clusters, can coordinate to ensure that only one acts as the leader at any given time.
+
+In distributed systems, especially in Kubernetes environments, it’s common to run multiple replicas of the same workload for availability and scalability. However, not all workloads are designed to run concurrently across all available replicas. Some require a **single active instance** responsible for coordinating actions such as scheduling jobs, processing queues, managing shared state etc. This is where leader election becomes necessary.
+
+## Leader Election in Kubernetes
+
+Kubernetes ensures that multiple instances of a `Pod` can run reliably, **but it does not inherently guarantee that only one of those instances performs a specific task; aka act a a leader**. Without coordination, this can lead to duplicated work, race conditions, or inconsistent system state.
+
+*Leader election* introduces a coordination mechanism where one instance is elected as the leader and is responsible for executing critical or even all sections of the workload, while the others remain passive or on standby. If the leader fails or becomes unavailable, another instance takes over. This pattern is commonly used in controllers, operators, and background workers. In a typical Kubernetes setup, leader election is scoped to a single cluster because it relies on the Kubernetes API as the coordination backend.
+
+**This becomes a limitation when workloads span multiple clusters and require a single global leader.**
+
+Kubernetes provides a resource called `Lease`, as part of the coordination API group, which is specifically designed for lightweight distributed coordination. A `Lease` object contains metadata such as the identity of the current leader, the duration of the lease and timestamps for renewals.
+
+Leader election works by having participants attempt to acquire or renew a lease. The pod that successfully holds and continuously renews the lease is considered the leader of the replica set. If the lease is not renewed within a defined time window, it is assumed that the leader has failed, and other participants can attempt to acquire it.
+
+This mechanism is efficient because it avoids heavy resource contention and relies on simple update operations against the Kubernetes API server. However, it is inherently limited to a single cluster. **When workloads span multiple clusters, this model no longer applies.**
+
+In such cases, one option is to introduce a shared “control-plane” cluster and have all workloads coordinate through its Kubernetes API, which quickly becomes complex and difficult to manage. An alternative approach, which this article focuses on, is to use a PostgreSQL database as a shared backend for storing and updating the leader election state.
+
+This solution relies on the Kubernetes leader election module, specifically `k8s.io/client-go/tools/leaderelection/resourcelock` which implements the core leader election algorithm including the lease acquisition and renewal logic, the leader transition handling and the respective timing configuration (lease duration, renew deadline, retry period etc.)
+
+Instead of using the default Kubernetes-backed lock (such as `Lease` objects), the implementation provides a custom lock that satisfies the expected `resourcelock` interface.
+
+> This allows the leader election logic from [client-go](https://github.com/kubernetes/client-go/tree/master/tools/leaderelection) to remain unchanged, while replacing the storage backend with PostgreSQL. As a result, the same leader election semantics are preserved, **but coordination is no longer tied to a single Kubernetes control plane.**
+
+## Database setup and migration execution
+
+To enable leader election across clusters, we need a shared and reliable coordination backend. In this implementation, PostgreSQL is used to store the leader election state. Every participating instance (each pod from each replica set, from every cluster) connects to the same database and reads or updates a single record that represents the current leader.
+
+The schema is minimal but you could extend it as you wish in order to hold the information you need. It is just a single table named `leader_election_locks` that holds **one row per logical election**. Each row is identified by a combination of `namespace` and `name`, and stores the serialized leader election record in JSON format. A `version` field is used to implement optimistic concurrency control, ensuring that updates only succeed if no other instance has modified the record in the meantime. An `updated_at` timestamp is also maintained for observability and debugging.
+
+> The article assumes you have already a PostgreSQL instance in place. If not, you can easily spin up one using the [official docker-compose manifest](https://awesome-docker-compose.com/postgresql-official) or via [Autobase for PostgreSQL](https://autobase.tech/).
+
+To apply the migration, the repository provides a small helper under `cmd/migration`, that collects and executes the SQL files located in the `migrations` directory:
+
+```sql
+CREATE TABLE leader_election_locks (
+    namespace   text        NOT NULL,
+    name        text        NOT NULL,
+    record_json jsonb       NOT NULL,
+    version     bigint      NOT NULL DEFAULT 1,
+    updated_at  timestamptz NOT NULL DEFAULT now(),
+    PRIMARY KEY (namespace, name)
+);
+
+CREATE INDEX idx_leader_election_locks_updated_at
+    ON leader_election_locks (updated_at);
+```
+
+Running it is straightforward:
+
+```bash
+go run ./cmd/migration
+```
+
+Once executed, the required table is created and ready to be used by the leader election logic. From that point on, all instances participating in the election will rely on this table as their shared coordination point.
+
+## Implementing the PostgreSQL resource lock
+
+At the core of this solution is `pglock/lock.go` , where we replaces the default Kubernetes resource lock with a PostgreSQL-backed alternative. Instead of relying on `Lease` objects stored in the Kubernetes API, the custom `Lock` component persists and manages the leader election state directly in the database.
+
+The PostgreSQL lock works because it satisfies the interface expected by the Kubernetes leader election library, namely the `resourcelock.Interface` from [client-go](https://github.com/kubernetes/client-go/tree/master/tools/leaderelection), and delegates all state operations to PostgreSQL.
+
+This interface defines how the leader election module interacts with the underlying coordination mechanism. It does not care whether the state is stored in a Kubernetes `Lease`, a `ConfigMap`, or, in this case, a PostgreSQL table. As long as the interface is implemented correctly, the leader election logic remains unchanged.
+
+The interface requires a small set of methods:
+
+- `Get()` retrieves the current leader election record
+
+- `Create()` initializes the record if it does not exist
+
+- `Update()` attempts to modify the record
+
+- `Identity()` returns the unique identity of the participant
+
+- `Describe()` provides a human-readable identifier for logging
+
+By implementing these methods in the `Lock` component in `pglock/lock.go`, the PostgreSQL-backed lock becomes a drop-in replacement for the standard Kubernetes resource locks. The `Lock` component identifies the specific election using a `namespace` and `name`, and keeps track of a local `version`. This version is important, as it enables optimistic concurrency control when multiple instances attempt to update the same record.
+
+1️⃣ The leader election module periodically calls `Get()` method which tries to retrieves the current election state, `resourcelock.LeaderElectionRecord` from the database and allows each instance to understand who the current leader is and whether the lock is already held.
+
+```go
+func (l *Lock) Get(ctx context.Context) (*resourcelock.LeaderElectionRecord, []byte, error) {
+ const q = `
+
+
+ var raw []byte
+ var version int64
+
+ err := l.pool.QueryRow(ctx, q, l.namespace, l.name).Scan(&raw, &version)
+ if err != nil {
+  if errors.Is(err, pgx.ErrNoRows) {
+   return nil, nil, ErrNotFound
+  }
+  return nil, nil, fmt.Errorf("getting leader lock failed: %w", err)
+ }
+
+ var rec resourcelock.LeaderElectionRecord
+ if err := json.Unmarshal(raw, &rec); err != nil {
+  return nil, nil, fmt.Errorf("unmarshalling leader record failed: %w", err)
+ }
+
+ l.mu.Lock()
+ l.lastVersion = version
+ l.mu.Unlock()
+
+ return &rec, raw, nil
+}
+```
+
+2️⃣ If no record exists yet, the `Create()` method is used to insert the a row. Since multiple instances may attempt this at the same time, the implementation relies on PostgreSQL’s unique constraint on `(namespace, name)` to ensure only one succeeds. Any duplicate insert attempts are treated as a normal primary key violation, guaranteeing that way deterministic strong consistency.
+
+```go
+func (l *Lock) Create(ctx context.Context, ler resourcelock.LeaderElectionRecord) error {
+ raw, err := json.Marshal(ler)
+ if err != nil {
+  return fmt.Errorf("marshalling leader record failed: %w", err)
+ }
+
+ const q = `
+INSERT INTO leader_election_locks(namespace, name, record_json, version, updated_at)
+VALUES ($1, $2, $3, 1, now())
+`
+ _, err = l.pool.Exec(ctx, q, l.namespace, l.name, raw)
+ if err != nil {
+  var pgErr *pgconn.PgError
+  if errors.As(err, &pgErr) && pgErr.Code == "23505" {
+   return ErrAlreadyExists
+  }
+  return fmt.Errorf("creating leader lock failed: %w", err)
+ }
+
+ l.mu.Lock()
+ l.lastVersion = 1
+ l.mu.Unlock()
+
+ return nil
+}
+```
+
+3️⃣ The most critical part is the `Update()` method. This is where leadership is renewed or transferred. Instead of blindly updating the row, the query includes the previously observed version. If the version still matches, the update succeeds and increments the version. If not, it means another instance has already modified the record, and the update is rejected.
+
+This approach ensures that only one instance can successfully update the leader record at a time, which is enough to maintain consistent leader election semantics. Combined with the retry and timing logic from [client-go](https://github.com/kubernetes/client-go/tree/master/tools/leaderelection), it provides a reliable coordination mechanism without requiring any Kubernetes API interaction.
+
+```go
+func (l *Lock) Update(ctx context.Context, ler resourcelock.LeaderElectionRecord) error {
+ raw, err := json.Marshal(ler)
+ if err != nil {
+  return fmt.Errorf("marshalling leader record failed: %w", err)
+ }
+
+ l.mu.Lock()
+ expectedVersion := l.lastVersion
+ l.mu.Unlock()
+
+ if expectedVersion == 0 {
+  return fmt.Errorf("updating called before get; no cached version")
+ }
+
+ const q = `
+UPDATE leader_election_locks
+SET record_json = $3,
+    version = version + 1,
+    updated_at = now()
+WHERE namespace = $1
+  AND name = $2
+  AND version = $4
+RETURNING version
+`
+ var newVersion int64
+ err = l.pool.QueryRow(ctx, q, l.namespace, l.name, raw, expectedVersion).Scan(&newVersion)
+ if err != nil {
+  if errors.Is(err, pgx.ErrNoRows) {
+   return ErrVersionConflict
+  }
+  return fmt.Errorf("updating leader lock failed: %w", err)
+ }
+
+ l.mu.Lock()
+ l.lastVersion = newVersion
+ l.mu.Unlock()
+
+ return nil
+}
+```
+
+> This separation is what makes the approach robust. The proven leader election behavior from Kubernetes is preserved, while the storage backend is replaced with PostgreSQL, enabling coordination across clusters without changing the core algorithm.
+
+## Implementing a sample workload
+
+To understand how everything fits together, we will build a simple client that requires a leader and consequently a leader election process. This sample will not demonstrate *how* leader election works (that is already handled by [client-go](https://github.com/kubernetes/client-go/tree/master/tools/leaderelection)) but *where* the coordination state lives and *how* the application integrates with it.
+
+1️⃣ We need at first, build a unique identity that includes cluster, namespace, and pod information. In a single-cluster setup, a pod name would be usually enough. In a cross-cluster scenario on the other hand it isn’t, because without including the cluster dimension, two different clusters could produce identical identities, which would break the election semantics.
+
+```perl
+identity := fmt.Sprintf("%s/%s/%s", cfg.ClusterName, cfg.Namespace, cfg.PodName)
+lock := pglock.New(pool, cfg.ElectionNamespace, cfg.ElectionName, identity)
+```
+
+Once identity is defined, the application initializes a new `Lock`. This is where the PostgreSQL-backed implementation comes in. As we already discussed before, the `Lock` component exposes a small set of methods `Get`, `Create`, and `Update`, which represent the full lifecycle of the election state.
+
+2️⃣ The leader election loop itself is driven by the configuration defined in a structure called `leaderelection.LeaderElectionConfig`. This is where the behavior is defined:
+
+- `LeaseDuration` defines how long leadership is considered valid without renewal (defaults to `15s`)
+
+- `RenewDeadline` defines how long the current leader keeps trying to renew before giving up (defaults to `10s`)
+
+- `RetryPeriod` defines how frequently non-leaders attempt to acquire the lock (default to `2s`)
+
+> These three parameters are not arbitrary. They enforce a timing model where a leader must continuously prove liveness, while others compete to take over when that liveness is lost.
+> All three parameters default values as well are not arbitrary. They’re set to the default values that are used internally in Kubernetes API and is really not advised to change them.
+
+```go
+lec := leaderelection.LeaderElectionConfig{
+  Lock:            lock,
+  ReleaseOnCancel: true,
+  LeaseDuration:   cfg.LeaseDuration,
+  RenewDeadline:   cfg.RenewDeadline,
+  RetryPeriod:     cfg.RetryPeriod,
+  Name:            cfg.ElectionName,
+  Callbacks: leaderelection.LeaderCallbacks{
+   OnStartedLeading: func(ctx context.Context) {
+    klog.Infof("elected as leader: identity='%s'", identity)
+
+    // Do what you have to do or call a function like leaderRun
+    leaderRun(ctx, identity)
+   },
+   OnStoppedLeading: func() {
+    klog.Infof("stepping down...")
+    //os.Exit(0)
+
+    // Do what you have to do or call a function to perform clean-up
+   },
+   OnNewLeader: func(id string) {
+    if id == identity {
+     return
+    }
+    klog.Infof("current leader: identity='%s'", id)
+   },
+  },
+ }
+```
+
+3️⃣ Once a new leader elector, `leaderelection.NewLeaderElector`, is created and `Run()` is called, the flow is consistent regardless of the backend:
+
+```go
+ elector, err := leaderelection.NewLeaderElector(lec)
+ if err != nil {
+  klog.Error("creating new leader elector failed: %v", err)
+  os.Exit(1)
+ }
+
+ elector.Run(ctx)
+```
+
+`Run()` binds the current process to the provided context. As long as the context is active, the instance participates in the election. When the context is cancelled (for example on `SIGTERM` or `SIGINT`), `Run()` ensures that participation stops cleanly and leadership is released.
+
+Internally, `Run()` starts a loop that continuously attempts (on **every** pod of the replica set of the workload) to acquire or renew leadership. This loop is not exposed directly but is encapsulated inside the elector. It drives calls to the resource lock (via the methods we discussed already `Get`, `Create`, `Update`) based on the configured timing parameters.
+
+The sample application, or any application you will implement using `pglock` or any similar implementation for that matter, never calls these methods directly during election. `Run()` is the component that decides *when* and *how often* they are invoked based on the configuration `leaderelection.LeaderElectionConfig` we provided to the elector.
+
+`Run()` is also responsible for invoking the registered callbacks (see above `OnStartedLeading`, `OnStoppedLeading`, `OnNewLeader`). It guarantees, regardless of resource lock implementation, that:
+
+- `OnStartedLeading` runs only after leadership is successfully acquired
+
+- `OnStoppedLeading` is triggered when leadership is lost or the context ends
+
+- `OnNewLeader` is triggered when a different leader is observed
+
+4️⃣ The leader election loop as we discussed above, is driven by `Run()`, but the application logic is defined through **callbacks**. The two that matter the most, are `OnStartedLeading` and `OnStoppedLeading`. These are the points where your application pods react to changes in leadership.
+
+`OnStartedLeading` is invoked **when the instance has successfully acquired the lock and is now considered the leader**. At this point, the election mechanism has already done the heavy lifting and there is no ambiguity about ownership. This callback is where you attach any logic that must run exclusively on that single instance that now acts as a leader.
+
+In the example, the callback calls `leaderRun(ctx, identity)`. That function represents the *leader-only* workload. It’s deliberately demonstrating a simple thing: once leadership is obtained, the process enters a controlled execution loop that continues as long as leadership is maintained or the parent context is cancelled:
+
+```go
+func leaderRun(ctx context.Context, identity string) {
+ ticker := time.NewTicker(5 * time.Second)
+ defer ticker.Stop()
+
+ klog.Infof("leader workload started: identity='%s'", identity)
+
+ for {
+  select {
+  case <-ctx.Done():
+   klog.Infof("leader workload stopping: identity='%s'", identity)
+   return
+  case <-ticker.C:
+   // do what you have to do here. here is your application/business logic
+   klog.Infof("leader workload tick: identity='%s'", identity)
+  }
+ }
+}
+```
+
+`OnStoppedLeading` is triggered when the instance loses leadership. This can happen for several reasons: the process failed to renew the lease in time, another instance successfully updated the record, or the application context was cancelled. The important part is that this callback marks the end of exclusive ownership and you can either inform your logs or proceed to clean-up tasks depending on your application logic.
+
+> This whole dance described above is the key takeaway of the election pattern. **The workload is not aware of leader election directly. It simply runs while the context is active and stops when it is cancelled**. Leader election controls *when* that context is valid.
+> In a real system, `leaderRun()` or however you want to call that method for that matter, would be replaced with something meaningful: a controller loop, a job scheduler, or a queue processor. The structure would remain the same. The only requirement is that the workload respects context cancellation so that leadership transitions remain clean and predictable.
+
+## Simulating leader election across multiple instances
+
+To see the behavior in practice we will let multiple instances of the sample application run simultaneously and compete to become the leader.
+
+1️⃣ First, build the application:
+
+```bash
+go build -o demo ./cmd/app
+```
+
+2️⃣ Before starting the instances, ensure that:
+
+- PostgreSQL is running and reachable
+
+- the migration has been applied
+
+- all instances use the same `POSTGRES_DSN`, `ELECTION_NAMESPACE`, and `ELECTION_NAME`
+
+`ELECTION_NAMESPACE` and `ELECTION_NAME` define **the scope and identity of a leader election group**. Together, they uniquely identify a single election within the shared PostgreSQL backend.
+
+**They are not related to Kubernetes namespaces** in a strict sense. In this implementation, they are simply logical identifiers used to group participants that should compete for the same leadership.
+
+At the database level, **these two values map directly to the primary key** of the `leader_election_locks` table. This means:
+
+- every unique `(namespace, name)` pair represents one independent election
+
+- all instances using the same pair will compete for the same leadership
+
+- instances using different values will not see or affect each other
+
+`ELECTION_NAME` defines *what* is being elected. It typically represents a specific workload or responsibility, such as a scheduler, controller, or background processor.
+
+`ELECTION_NAMESPACE` is used to group or isolate elections. It can be used to separate environments (for example `dev`, `staging`, `prod`) or logical domains within a system.
+
+A useful way to think about it is:
+
+- `ELECTION_NAME` → the role
+
+- `ELECTION_NAMESPACE` → the scope
+
+For example:
+
+```ini
+ELECTION_NAMESPACE=prod
+ELECTION_NAME=job-runner
+```
+
+All instances configured with these values will compete to become the single leader responsible for running the job runner in the production environment. If you change either value, you create a completely separate election. **This allows multiple independent leader election processes to coexist in the same PostgreSQL database without interfering with each other.**
+
+3️⃣ Each instance must have a unique identity. In a Kubernetes environment, this comes naturally from pod metadata. For local testing, you can simulate this by setting different pod name and namespace values.
+
+Start **three instances** in separate terminals (we will leave the default value for `ELECTION_NAMESPACE` and `ELECTION_NAME`):
+
+```bash
+POSTGRES_DSN="postgres://user:pass@localhost:5432/db" \
+K8S_CLUSTER_NAME=cluster-a \
+K8S_NAMESPACE=default \
+K8S_POD_NAME=pod-1 \
+./demo
+```
+
+```bash
+POSTGRES_DSN="postgres://user:pass@localhost:5432/db" \
+K8S_CLUSTER_NAME=cluster-b \
+K8S_NAMESPACE=default \
+K8S_POD_NAME=pod-2 \
+./demo
+```
+
+```bash
+POSTGRES_DSN="postgres://user:pass@localhost:5432/db" \
+K8S_CLUSTER_NAME=cluster-c \
+K8S_NAMESPACE=default \
+K8S_POD_NAME=pod-3 \
+./demo
+```
+
+> Replace the `POSTGRES_DSN` value with your own database connection string, matching your PostgreSQL user, password, host, port, and database name.
+
+4️⃣ Once all instances are running, you will observe that:
+
+- **only one instance** logs that it has become leader
+
+- the other instances report the current leader through `OnNewLeader`
+
+- **only the leader** executes the periodic workload
+
+To observe a leadership change, terminate the leader process (for example with *Ctrl+C*). After the lease expires, one of the remaining instances will acquire leadership. You will observe:
+
+- the previous leader stops its workload
+
+- a new instance logs that it has started leading
+
+- the workload resumes on the new leader
+
+This demonstrates that all instances are coordinating exclusively through PostgreSQL. There is no Kubernetes API involved, yet the behavior matches the standard Kubernetes coordination API leader election semantics: a single active leader, automatic fail-over, and continuous renewal of ownership.
+
+## Conclusion
+
+This approach demonstrates that leader election for Kubernetes workloads does not have to be tied to the Kubernetes API. By implementing the `resourcelock.Interface` and using PostgreSQL as the coordination backend, **we retain the proven leader election semantics** from `client-go` while **extending them beyond a single cluster boundary**.
+
+The main advantage of this design is flexibility. It enables coordination across clusters, regions, or even hybrid environments where a shared Kubernetes control plane is not available or not desirable. It also keeps the application structure unchanged. Workloads still rely on the same leader election model and callbacks, which makes the transition straightforward.
+
+There are, however, trade-offs. PostgreSQL becomes a critical dependency for coordination. Its availability and latency directly affect leader election behavior, especially lease renewal and failover timing. This also introduces a different operational concern compared to relying on the Kubernetes API, which is already part of the cluster control plane. Additionally, this model does not introduce stronger guarantees than the original leader election mechanism. It should still be treated as a coordination tool, not as strict distributed locking with **fencing**.
+
+> **Fencing** is a mechanism used in distributed systems to prevent a previous leader from continuing to act after it has lost leadership.
+> In simple terms, even if a node *thinks* it is still the leader (due to network delays or pauses), fencing ensures that its actions are rejected. This is usually done by attaching a **monotonically increasing token (fencing token)** to each leadership term. Only the node with the latest token is allowed to perform operations.
+> Without fencing, two instances might briefly act as leader at the same time, leading to conflicting updates.
+
+PostgreSQL itself, is not a hard requirement. The same approach can be applied to **any** backend that can provide consistent read and conditional update semantics. The only requirement is to implement the expected interface correctly. This opens the door to using other systems such as Redis, etcd, or any data-store that can support similar concurrency patterns. The full implementation, including the PostgreSQL-backed lock and the sample application, is available here:
+
+This repository can be used as a starting point or adapted to fit different environments and backend choices, depending on the coordination requirements.
+
+Originally published on [Medium](https://medium.com/itnext/cross-cluster-leader-election-for-kubernetes-workloads-3548f77b0531)
