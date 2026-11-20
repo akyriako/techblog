@@ -39,8 +39,13 @@ MEDIUM_URL_RE = re.compile(
     r'/[^\s)>\'"]+'
 )
 
+# IMAGE_ID_RE = re.compile(
+#     r'^[01]\*[A-Za-z0-9_-]+\.(?:png|jpe?g|webp|gif)$',
+#     re.IGNORECASE,
+# )
+
 IMAGE_ID_RE = re.compile(
-    r'^[01]\*[A-Za-z0-9_-]+\.(?:png|jpe?g|webp|gif)$',
+    r'^[01]\*[A-Za-z0-9_-]+(?:\.(?:png|jpe?g|webp|gif))?$',
     re.IGNORECASE,
 )
 
