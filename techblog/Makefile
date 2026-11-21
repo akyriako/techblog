@@ -1,7 +1,7 @@
 REGISTRY   := quay.io
 NAMESPACE  ?= akyriako
 IMAGE      := techblog
-TAG        ?= 0.1.1
+TAG        ?= latest
 
 IMAGE_REF := $(REGISTRY)/$(NAMESPACE)/$(IMAGE):$(TAG)
 
@@ -12,7 +12,7 @@ login:
 
 build:
 	docker build -t $(IMAGE_REF) .
-	
+
 push:
 	docker push $(IMAGE_REF)
 
