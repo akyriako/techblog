@@ -12,7 +12,11 @@ heroImage:
   src: "./thumbnail.jpg"
 ---
 
-> Ingress NGINX Controller for Kubernetes is retired on March 2026 and Kubernetes Ingress API will receive no future development. Configure Traefik as a shared Gateway in [K3s](https://k3s.io/).
+import { Aside } from 'astro-pure/user'
+
+<Aside type="caution">
+Ingress NGINX Controller for Kubernetes is retired on March 2026 and Kubernetes Ingress API will receive no future development. Configure Traefik as a shared Gateway in [K3s](https://k3s.io/).
+</Aside>
 
 The Kubernetes [**Ingress API**](https://kubernetes.io/docs/concepts/services-networking/ingress-controllers/) is feature-frozen and will not developed any further. New traffic management capabilities are being developed in the Kubernetes [**Gateway API**](https://kubernetes.io/docs/concepts/services-networking/gateway/), which provides a more expressive and extensible model for service networking, but is still lacking the feature parity with the Ingress API. As stated in Kubernetes official documentation:
 
@@ -26,29 +30,35 @@ Ingress and Gateway APIs **can coexist** in the same cluster. Migration does not
 
 Using a **shared Gateway** has several advantages. It allows a single, centrally managed entry point to serve multiple applications, reduces duplication of configuration, and limits the permissions required by application teams. Applications only need to create route resources in their own namespaces, while certificates, listeners, and exposure policies remain under the control of the Gateway owner.
 
-### Gateway API Components
+## Gateway API Components
 
 The Gateway API defines a set of resources that separate **infrastructure concerns** from **application routing concerns**. Each resource (4 stable at the time of writing) has a clear responsibility and scope:
 
-#### GatewayClass
+### GatewayClass
 
 A `GatewayClass` represents a type of Gateway implementation (exactly as the `IngressClass` for the Ingress API). It is defined by the infrastructure or platform layer and is typically installed by a Gateway controller (for example, Traefik, Envoy Gateway, Kong and [many others](https://gateway-api.sigs.k8s.io/implementations/#gateway-controller-implementation-status)).
 
-> Application teams do not interact with `GatewayClass` directly.
+<Aside type="note">
+Application teams do not interact with `GatewayClass` directly.
+</Aside>
 
-#### Gateway
+### Gateway
 
 A `Gateway` represents a network entry point into the cluster. It defines where and how traffic enters the system (per cluster if shared or per application if dedicated).
 
-> Gateways are usually managed by platform or infrastructure teams and are often shared across multiple applications and namespaces.
+<Aside type="note">
+Gateways are usually managed by platform or infrastructure teams and are often shared across multiple applications and namespaces.
+</Aside>
 
-#### Routes
+### Routes
 
 Routes define **application-level routing** to backend services and attach to a Gateway. `HTTPRoute` is the most common route type and is used for good ole’ HTTP and HTTPS traffic. `GRPCRoute` on the other hand, defines gRPC-specific rules for routing traffic from a Gateway to backend network endpoints.
 
-> Routes are typically created and managed by application teams in their own namespaces.
+<Aside type="note">
+Routes are typically created and managed by application teams in their own namespaces.
+</Aside>
 
-### Configure K3s Helm Charts Manifests
+## Configure K3s Helm Charts Manifests
 
 [K3s](https://k3s.io/), in its default configuration, comes pre-configured with Traefik and this where we are going to focus on. Traefik Gateway CRDs are installed but no `GatewayClass` or `Gateway` are enabled or deployed. K3s is bootstrapped with a Traefik Ingress.
 
@@ -68,7 +78,9 @@ This mechanism allows cluster configuration and enables automatic upfront bootst
 - For the HTTPS listener set `mode` to `Terminate`. With this knob TLS connections are terminated at the Gateway. TLS handling is centralized at the Gateway and like this we avoid the need for individual applications to manage certificates or serve HTTPS themselves.
 - When using `protocol: HTTPS` with `mode: Terminate`, the Gateway **must** reference **at least one TLS certificate**. Without a certificate, the Gateway controller cannot program the listener. Certificates are referenced using the stanza`certificateRefs`, which point to Kubernetes `Secret` objects of type `kubernetes.io/tls`. The `Secret` must exist in the same namespace as the `Gateway`, contain a valid certificate and private key and of course match the hostnames served by the listener.
 
-> In a shared Gateway setup, certificate management is typically handled by the platform or infrastructure layer.
+<Aside type="note">
+In a shared Gateway setup, certificate management is typically handled by the platform or infrastructure layer.
+</Aside>
 
 ```
 apiVersion: helm.cattle.io/v1  
@@ -106,10 +118,11 @@ Create the `wildcard-cert-tls` (see next paragraph) and **then** restart the K3s
 ```
 sudo systemctl restart k3s
 ```
+<Aside type="note">
+Assuming you are running a Debian-family operating system; otherwise, adjust the command above accordingly.
+</Aside>
 
-> Assuming you are running a Debian-family operating system; otherwise, adjust the command above accordingly.
-
-### Create a Wildcard Certificate
+## Create a Wildcard Certificate
 
 A wildcard certificate allows a single certificate to cover multiple hostnames under the same domain. For example, a certificate for `*.apps.mylab.home` can be used for serving multiple applications e.g.:
 
@@ -119,7 +132,7 @@ A wildcard certificate allows a single certificate to cover multiple hostnames u
 
 This is useful in shared Gateway deployments, where multiple applications attach routes to the same HTTPS listener.
 
-Let’s lay the create a wildcard certificate for our private published services
+Let's lay the create a wildcard certificate for our private published services
 
 1️⃣ Create a file **wildcard.cnf** and paste the following:
 
@@ -143,8 +156,9 @@ extendedKeyUsage = serverAuth
 DNS.1 = apps.mylab.home  
 DNS.2 = *.apps.mylab.home
 ```
-
-> *Replace* `CN`*,*`DNS.1` *and* `DNS.2` *with the values specific to your environment.*
+<Aside type="note">
+Replace `CN`,`DNS.1` *and* `DNS.2` with the values specific to your environment.
+</Aside>
 
 2️⃣ Create the Certificate
 
@@ -170,11 +184,15 @@ You have to make sure that the external IPs that are assigned to your Gateway/In
 
 Once both Gateway and Secret are configured, the Gateway can serve HTTPS for any route whose hostname matches the certificate.
 
-> If on the other hand you are planning to expose services to the public, TLS certificates should be issued by a publicly trusted certificate authority (like Let’s Encrypt for instance). In Kubernetes environments, this is commonly handled using [**cert-manager**](https://cert-manager.io/) with a DNS-based ACME challenge ([DNS-01](https://cert-manager.io/docs/configuration/acme/dns01/)). DNS validation is required for wildcard certificates and/or for clusters that are not directly reachable over HTTP.
-> In this setup, cert-manager is responsible for obtaining and renewing the certificate, while the resulting TLS `Secret` is referenced by the Gateway listener. The DNS provider configuration (DNS solver) must be able to create and remove validation records for the target domain.
-> This approach allows certificate management to remain automated and independent of application routing configuration.
+<Aside type="note">
+If on the other hand you are planning to expose services to the public, TLS certificates should be issued by a publicly trusted certificate authority (like Let’s Encrypt for instance). In Kubernetes environments, this is commonly handled using [**cert-manager**](https://cert-manager.io/) with a DNS-based ACME challenge ([DNS-01](https://cert-manager.io/docs/configuration/acme/dns01/)). DNS validation is required for wildcard certificates and/or for clusters that are not directly reachable over HTTP.
 
-### Create a Workload
+In this setup, cert-manager is responsible for obtaining and renewing the certificate, while the resulting TLS `Secret` is referenced by the Gateway listener. The DNS provider configuration (DNS solver) must be able to create and remove validation records for the target domain.
+
+This approach allows certificate management to remain automated and independent of application routing configuration.
+</Aside>
+
+## Create a Workload
 
 We are going to test the whole setting now with deploying and exposing [traefik/whoami](https://github.com/traefik/whoami) internally.
 
@@ -250,7 +268,7 @@ spec:
 
 Of course the Certificate is not trusted as it is a self-signed one.
 
-### Closing Thoughts
+## Closing Thoughts
 
 Retiring [**kubernetes/ingress-nginx**](https://github.com/kubernetes/ingress-nginx) sets a genuinely bad precedent for the ecosystem because it shows that even *foundational* “it’s everywhere” components can become unsustainable and then get shut down without a fully community-owned succession plan.
 
@@ -260,6 +278,8 @@ There isn’t a single definitive estimate of the blast radius of this event, bu
 
 As long as Ingress API is getting no new features, sooner or later you’ll need considering moving to Gateway API (unless you have a strong technical reason to do otherewise).
 
-> ⚠*️* **This article does not advocate replacing the Kubernetes Ingress NGINX Controller with Traefik Gateway. It simply explains how to configure a K3s cluster to use a shared Gateway, leaving the choice of controller to your specific needs.**
+<Aside type="caution">
+This article does not advocate replacing the Kubernetes Ingress NGINX Controller with Traefik Gateway. It simply explains how to configure a K3s cluster to use a shared Gateway, leaving the choice of controller to your specific needs.
+</Aside>
 
 Originally published on [Medium](https://medium.com/itnext/configure-a-shared-tr%C3%A6fik-gateway-on-k3s-b09fb0d32c6e)
