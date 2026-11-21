@@ -12,7 +12,7 @@ heroImage:
   src: "./thumbnail.png"
 ---
 
-> *⚠️* If you are new to [Cluster API (CAPI)](https://github.com/kubernetes-sigs/cluster-api), please refer to my previous article, [Build your own Managed Kubernetes Service on Proxmox with CAPI](/blog/managed-kubernetes-proxmox-capi/index.md), for a detailed introduction.
+> *⚠️* If you are new to [Cluster API (CAPI)](https://github.com/kubernetes-sigs/cluster-api), please refer to my previous article, [Build your own Managed Kubernetes Service on Proxmox with CAPI](/blog/managed-kubernetes-proxmox-capi), for a detailed introduction.
 
 ## Prerequisites
 
