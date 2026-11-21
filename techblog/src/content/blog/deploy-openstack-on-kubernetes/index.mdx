@@ -13,12 +13,16 @@ comment: false
 heroImage: { src: './thumbnail.png', color: '#D58388' }
 ---
 
+import { Aside } from 'astro-pure/user'
+import { GithubCard } from 'astro-pure/advanced'
 
+<Aside type="tip" title="TL;DR">
 Build a Kubernetes-native OpenStack cloud in under an hour using Proxmox, K3s, Ceph and OpenStack-Helm.
 
 Instead of manually assembling every [OpenStack](https://www.openstack.org/) moving part, we use a bunch of automation scripts to built around [K3s](https://k3s.io/), [Rook-Ceph](https://rook.io/), and > [OpenStack-Helm](https://github.com/openstack/openstack-helm) in order to deploy a fully functional OpenStack environment on a three-node Kubernetes cluster. Starting from a handful of virtual machines, we will bootstrap Kubernetes, provision distributed storage, prepare the networking stack, and deploy the OpenStack control plane and compute services with a series of repeatable, idempotent, scripted steps.
  
 The result is not a toy deployment (not a production deployment though) or a collection of isolated services. By the end of the process, you will have a working OpenStack cloud with Keystone, Glance, Nova, Neutron, Cinder, Heat, Horizon, and Skyline running on Kubernetes, backed by Ceph storage and ready to launch networks & virtual machines for your homelab or your OpenStack development environment.
+</Aside>
 
 ## Prerequisites
 
@@ -47,12 +51,15 @@ So this is what you are going to need:
 
 Before proceeding, clone the deployment repository to the node (the one destined to be the master node of your K3s cluster) that will be used to orchestrate the installation. All automation scripts, configuration templates, and deployment assets referenced throughout this article are contained in the repository:
 
+<GithubCard repo='akyriako/osh' />
+
 ```bash
 git clone https://github.com/akyriako/osh.git
 cd osh
 ```
-
-> Unless stated otherwise, all commands shown in the remainder of this guide are executed from within the cloned repository directory.
+<Aside type="caution">
+Unless stated otherwise, all commands shown in the remainder of this guide are executed from within the cloned repository directory.
+</Aside>
 
 ## Architecture
 
@@ -88,7 +95,9 @@ The first step is to establish the Kubernetes cluster that will host the entire 
 
 The `install-k3s.sh` script bootstraps the cluster by installing K3s on the control-plane node and preparing it for the addition of worker nodes. During this phase, it installs and configures K3s, prepares cluster access, installs the tooling required throughout the remainder of the deployment, and exposes the default Traefik ingress controller (ingress for non-OpenStack workloads) on `HTTP/8080` and `HTTPS/8443`.
 
-> K3s was chosen because it provides a fully conformant Kubernetes distribution while keeping the operational footprint small, making it well suited for lab environments and proof-of-concept deployments.
+<Aside type="note">
+K3s was chosen because it provides a fully conformant Kubernetes distribution while keeping the operational footprint small, making it well suited for lab environments and proof-of-concept deployments.
+</Aside>
 
 ```bash
 sudo ./scripts/install-k3s.sh
@@ -96,7 +105,9 @@ sudo ./scripts/install-k3s.sh
 
 Once the control-plane installation is complete, the script generates a ready-to-use worker join-command. This command contains the information required for additional **worker** nodes to securely join the cluster and **must be executed on each worker node**.
 
-> After running the join-command on each worker node and confirming that all nodes are part of the cluster, only then you are clear to move on to the next phase of the deployment.
+<Aside type="note">
+After running the join-command on each worker node and confirming that all nodes are part of the cluster, only then you are clear to move on to the next phase of the deployment.
+</Aside>
 
 ## Post-Installation Steps for K3s Nodes
 
@@ -107,8 +118,9 @@ The `post-k3s.sh` script prepares each node for the workload that will follow. I
 ```bash
 sudo ./scripts/post-k3s.sh
 ```
-
-> Run this script **on every node** in the cluster, including both the control-plane and worker nodes. Although the changes are relatively small, they establish a more suitable baseline for the storage and virtualization workloads that will be introduced in the next phases of the deployment.
+<Aside type="caution">
+Run this script **on every node** in the cluster, including both the control-plane and worker nodes. Although the changes are relatively small, they establish a more suitable baseline for the storage and virtualization workloads that will be introduced in the next phases of the deployment.
+</Aside>
 
 ## Prepare OPNsense HAProxy and Unbound DNS
 
@@ -185,7 +197,12 @@ That will create:
 Rook takes care of deploying and managing the Ceph components inside Kubernetes, while Ceph itself provides the resilient block storage backend consumed by both Kubernetes and OpenStack. As part of the installation, the script creates the Ceph cluster, provisions the OSDs on the dedicated disks, creates an RBD pool, and exposes a Kubernetes `StorageClass` that will later be used by OpenStack-Helm itself.
 
 ![OpenStack on Kubernetes article illustration](./medium-image-12.png)
-> At this stage, we are not yet deploying any OpenStack services. Instead, we are establishing one of the most critical building blocks of the platform: **a shared storage layer that spans all nodes in the cluster**. By the time the installation completes, the Kubernetes environment has gained a distributed storage backend capable of supporting Glance image storage, Cinder volumes, and the persistent data requirements of the OpenStack control plane.
+
+<Aside type="note">
+At this stage, we are not yet deploying any OpenStack services. Instead, we are establishing one of the most critical building blocks of the platform: **a shared storage layer that spans all nodes in the cluster**. 
+
+By the time the installation completes, the Kubernetes environment has gained a distributed storage backend capable of supporting Glance image storage, Cinder volumes, and the persistent data requirements of the OpenStack control plane.
+</Aside>
 
 The Ceph dashboard is also exposed through the management ingress, allowing you to verify the health of the cluster before proceeding with the OpenStack deployment.
 
@@ -202,8 +219,9 @@ The `install-osh-deps.sh` script prepares the environment expected by the OpenSt
 ```bash
 sudo ./scripts/install-osh-deps.sh
 ```
-
-> *K3s ships with* [*Traefik*](https://docs.k3s.io/networking/networking-services#traefik-ingress-controller) *as its default ingress controller. Earlier in the deployment, we reconfigured Traefik to listen on ports* `8080` *and* `8443`*, reserving the standard* `80` *and* `443` *ports for the dedicated NGINX ingress controller that will expose the OpenStack APIs and dashboards.*
+<Aside type="note">
+K3s ships with [Traefik](https://docs.k3s.io/networking/networking-services#traefik-ingress-controller) as its default ingress controller. Earlier in the deployment, we reconfigured Traefik to listen on ports `8080` *and* `8443`, reserving the standard `80` *and* `443` ports for the dedicated NGINX ingress controller that will expose the OpenStack APIs and dashboards.
+</Aside>
 
 Another important part of this step is node preparation. OpenStack-Helm relies on specific node labels and scheduling expectations, so the script adjusts labels and taints to make the K3s nodes suitable for OpenStack workloads. Without this alignment, charts may install successfully but fail to schedule the required pods.
 
@@ -243,7 +261,9 @@ To provide a user-facing experience, **Horizon** is deployed as the traditional 
 
  Horizon is the traditional OpenStack dashboard and provides a web-based interface for managing cloud resources, including instances, networks, images, volumes, and projects.
 
-> At this stage, our cloud is **not yet** capable of launching virtual machines. The compute and networking services that make this possible are introduced later. What we laid here is the operational foundations of OpenStack: identity management, image management, and user access.
+<Aside type="note">
+At this stage, our cloud is **not yet** capable of launching virtual machines. The compute and networking services that make this possible are introduced later. What we laid here is the operational foundations of OpenStack: identity management, image management, and user access.
+</Aside>
 
 The remaining phases will build upon this foundation by adding storage, orchestration, networking, and ultimately the ability to provision and operate virtual machines.
 
@@ -254,10 +274,11 @@ The remaining phases will build upon this foundation by adding storage, orchestr
 ```bash
 sudo ./scripts/install-osh.sh --cinder
 ```
+<Aside type="note">
+In this deployment, Cinder is backed by the Ceph cluster that was created earlier. This means that block volumes are not tied to a particular Kubernetes node or compute host. Instead, they are stored on the distributed Ceph backend, providing the resilience and flexibility expected from a real cloud storage service.
 
-> In this deployment, Cinder is backed by the Ceph cluster that was created earlier. This means that block volumes are not tied to a particular Kubernetes node or compute host. Instead, they are stored on the distributed Ceph backend, providing the resilience and flexibility expected from a real cloud storage service.
-
-> While users may not immediately interact with Cinder when exploring the dashboards, many workloads depend on it. Databases, stateful applications, and long-lived virtual machines often require storage that persists beyond the lifetime of a single instance. Cinder provides that capability and completes another essential building block of the cloud platform.
+While users may not immediately interact with Cinder when exploring the dashboards, many workloads depend on it. Databases, stateful applications, and long-lived virtual machines often require storage that persists beyond the lifetime of a single instance. Cinder provides that capability and completes another essential building block of the cloud platform.
+</Aside>
 
 3️⃣ The final component introduced during this phase is Heat, OpenStack’s native orchestration service.
 
@@ -278,8 +299,9 @@ For many years, Horizon has been the primary graphical interface for OpenStack. 
 ```bash
 sudo ./scripts/install-osh.sh --skyline
 ```
-
-> Skyline does not replace any core OpenStack functionality. Instead, it provides an alternative way for administrators and users to interact with the platform, complementing the traditional Horizon dashboard already deployed in the previous step.
+<Aside type="note">
+Skyline does not replace any core OpenStack functionality. Instead, it provides an alternative way for administrators and users to interact with the platform, complementing the traditional Horizon dashboard already deployed in the previous step.
+</Aside>
 
 ![Skyline login page displayed through a web browser. The interface shows the OpenStack region selector, domain selection, username and password fields, and a custom cloud branding theme. The page is served through the OpenStack ingress layer and authenticates users against Keystone.](./medium-image-16.png)
 
@@ -298,8 +320,9 @@ The purpose of this step is to prepare the cluster for virtualization workloads 
 ```bash
 sudo ./scripts/install-osh.sh --libvirt
 ```
-
-> It is important to note at this point, that t**he libvirt pods do not immediately transition to a** `Running` **state**. *This is expected*. At this stage, part of the networking infrastructure required by the compute stack is not yet available. Once Neutron and the remaining compute services are deployed in the next phase, libvirt completes its initialization and becomes fully operational.
+<Aside type="note">
+ It is important to note at this point, that t**he libvirt pods do not immediately transition to a** `Running` **state**. *This is expected*. At this stage, part of the networking infrastructure required by the compute stack is not yet available. Once Neutron and the remaining compute services are deployed in the next phase, libvirt completes its initialization and becomes fully operational.
+</Aside>
 
 By the end of this step, the cluster has everything required to host virtual machines from a hypervisor perspective. The final piece missing is the OpenStack compute stack itself, which will connect Nova, Neutron, Placement, and libvirt into a complete virtualization platform.
 
