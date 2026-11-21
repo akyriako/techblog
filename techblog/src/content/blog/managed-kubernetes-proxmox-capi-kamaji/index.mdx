@@ -12,7 +12,11 @@ heroImage:
   src: "./thumbnail.png"
 ---
 
-> *⚠️* If you are new to [Cluster API (CAPI)](https://github.com/kubernetes-sigs/cluster-api), please refer to my previous article, [Build your own Managed Kubernetes Service on Proxmox with CAPI](/blog/managed-kubernetes-proxmox-capi), for a detailed introduction.
+import { Aside } from 'astro-pure/user'
+
+<Aside type="note">
+If you are new to [Cluster API (CAPI)](https://github.com/kubernetes-sigs/cluster-api), please refer to my previous article, [Build your own Managed Kubernetes Service on Proxmox with CAPI](/blog/managed-kubernetes-proxmox-capi), for a detailed introduction.
+</Aside>
 
 ## Prerequisites
 
@@ -24,13 +28,15 @@ For this lab you need to bring with:
 4. A workstation with homebrew, kubectl, [clusterctl](https://cluster-api.sigs.k8s.io/clusterctl/overview.html).
 5. A virtual machine with [k3s](https://k3s.io/) (4 vCPUs, 6GB RAM no ballooning) for implementing the Kamaji part of the lab (In this case, the management cluster cannot be illustrated using [kind](https://kind.sigs.k8s.io/), unlike in the previous article.
 
-> *⚠️* This lab requires Proxmox version `8.4.12`. Earlier versions exhibit issues with the integration with the [CAPMOX](https://github.com/ionos-cloud/cluster-api-provider-proxmox) provider, and later versions have not been tested by this guide.
+<Aside type="caution">
+This lab requires Proxmox version `8.4.12`. Earlier versions exhibit issues with the integration with the [CAPMOX](https://github.com/ionos-cloud/cluster-api-provider-proxmox) provider, and later versions have not been tested by this guide.
+</Aside>
 
 In this lab we are going to demonstrate how you could create your own Managed Kubernetes Service using CAPI with Proxmox as infrastructure provider, [kubeadm](https://kubernetes.io/docs/reference/setup-tools/kubeadm/) as bootstrap provider and for the role of control plane provider we are going to use [Kamaji](https://kamaji.clastix.io/).
 
 ![](./medium-43824dd5fa0f.png)
 
-## What is Kamaji?
+## What is Kamaji?
 
 [Kamaji](https://github.com/clastix/kamaji) is an open-source project developed by [Clastix](https://clastix.io/) that implements the Kubernetes control plane as a hosted service running entirely on Kubernetes itself. Instead of provisioning dedicated virtual machines or bare-metal servers for etcd, kube-apiserver, the controller manager, and the scheduler, Kamaji runs these components as Pods within a management cluster and exposes them to tenant clusters through a lightweight API. This hosted control plane model decouples control plane lifecycle management from the underlying infrastructure, significantly reducing operational overhead and resource duplication.
 
@@ -38,10 +44,11 @@ Under the hood, Kamaji introduces two new API groups. The `TenantControlPlane` r
 
 ## Preparing your Proxmox Users and API Tokens
 
-> *❗️*You can skip this section if you have already completed the setup by following the steps outlined in the previous article.
+<Aside type="note">
+You can skip this section if you have already completed the setup by following the steps outlined in the previous article.
+</Aside>
 
 Before we can build images, the image-builder needs permission to interact with your Proxmox environment through its API. This access allows it to launch a virtual machine, perform the build process, and then turn that VM into a reusable template. Execute the following command in one of your Proxmox nodes:
-
 
 ```bash
 pveum user add image-builder@pve
@@ -55,39 +62,34 @@ pveum user token add capmox@pve capi -privsep 0
 
 ## Building Images for Proxmox with image-builder
 
-> *‼️*Given that this is a quite lengthy configuration step, and to avoid cluttering the article or making it unnecessarily long, please refer to the corresponding section in the previous article, if you have not already completed it. Otherwise, you can safely skip this step.
+<Aside type="note">
+Given that this is a quite lengthy configuration step, and to avoid cluttering the article or making it unnecessarily long, please refer to the corresponding section in the previous article, if you have not already completed it. Otherwise, you can safely skip this step.
+</Aside>
 
 ## Installing Prerequisites
 
-> To maintain a single guide for both macOS and Linux, we’ll use [Homebrew](https://brew.sh/) to install the binaries required for managing the cluster.
-
 1️⃣ Install Homebrew
-
 
 ```bash
 /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
 ```
 
-
 Follow the instructions of the installer, to complete the installation.
 
 2️⃣ Install kubectl
-
 
 ```bash
 brew install kubectl
 ```
 
-
 3️⃣ Install clusterctl
-
 
 ```bash
 brew install clusterctl
 ```
-
-
-> *⚠️* This lab requires clusterctl version `v1.11.3` or later.
+<Aside type="caution">
+This lab requires clusterctl version `v1.11.3` or later.
+</Aside>
 
 The `clusterctl` CLI delivers a streamlined “day one” experience for CAPI by automatically retrieving and installing the necessary provider manifests. It embeds recommended best practices for provider management, helping you avoid mis-configurations and simplifying tasks like upgrades.
 
@@ -97,18 +99,16 @@ Built on top of `clusterctl`, the Cluster API Operator is a Kubernetes operator 
 
 Create a a file named `capmox.env`, and fill it in with the following content:
 
-
 ```bash
 export PROXMOX_URL="https://<PROXMOX_NODE_IP>:8006"
 export PROXMOX_TOKEN='capmox@pve!capi'
 export PROXMOX_SECRET="<CAPMOX_API_TOKEN_SECRET>"                          
 export PROXMOX_SKIP_TLS_VERIFY="true"
 ```
-
-
-> Replace every occurrence of `<PROXMOX_NODE_IP>` with the IP address and CIDR corresponding to your bridge interface (`vmbr0`, for this lab).
-
-> Do the same for `<CAPMOX_API_TOKEN_SECRET>`, using the appropriate value for your environment.
+<Aside type="note">
+Replace every occurrence of `<PROXMOX_NODE_IP>` with the IP address and CIDR corresponding to your bridge interface (`vmbr0`, for this lab).
+Do the same for `<CAPMOX_API_TOKEN_SECRET>`, using the appropriate value for your environment.
+</Aside>
 
 ## Setting up a Management Cluster
 
@@ -127,12 +127,15 @@ sudo cp /etc/rancher/k3s/k3s.yaml ~/.kube/config
 sudo chown <USER>:<USER> ~/.kube/config
 ```
 
-
-> Replace `<USER>` with the appropriate user and group for your environment.
+<Aside type="note">
+Replace `<USER>` with the appropriate user and group for your environment.
+</Aside>
 
 If the management cluster is running on a different virtual machine, copy `~/.kube/config` to your bootstrap machine where the required prerequisites (Homebrew, kubectl, and clusterctl) are already installed.
 
-> Make sure you change the `server` value from `https://127.0.0.1:6443` to the IP address assigned on the network device that uses the bridge `vmbr0`.
+<Aside type="note">
+Make sure you change the `server` value from `https://127.0.0.1:6443` to the IP address assigned on the network device that uses the bridge `vmbr0`.
+</Aside>
 
 ⏩ **Switch now to your bootstrap machine.**
 
@@ -152,9 +155,7 @@ helm install \
   --set installCRDs=true
 ```
 
-
 3️⃣ Install the Kamaji Operator
-
 
 ```bash
 helm repo add clastix https://clastix.github.io/charts
@@ -167,11 +168,11 @@ helm install kamaji clastix/kamaji \
     --set image.tag=latest
 ```
 
-
 4️⃣ Install MetalLB
 
-> *⚠️* Kamaji provisions the control plane as a set of Pods exposed through a Service. This Service must be assigned an IP address within the network defined by the `vmbr0` interface so that it is reachable by worker nodes and by consumers of the cluster. For this reason, a solution such as [MetalLB](https://github.com/metallb/metallb) is required. Other alternatives may also be suitable; e.g., [kube-vip](https://github.com/kube-vip/kube-vip) or [klipper](https://github.com/k3s-io/klipper-lb) the embedded K3s service load balancer which in our case would mean you need to reinstall the cluster, since it was provisioned **without** Traefik and Klipper.
-
+<Aside type="note">
+Kamaji provisions the control plane as a set of Pods exposed through a Service. This Service must be assigned an IP address within the network defined by the `vmbr0` interface so that it is reachable by worker nodes and by consumers of the cluster. For this reason, a solution such as [MetalLB](https://github.com/metallb/metallb) is required. Other alternatives may also be suitable; e.g., [kube-vip](https://github.com/kube-vip/kube-vip) or [klipper](https://github.com/k3s-io/klipper-lb) the embedded K3s service load balancer which in our case would mean you need to reinstall the cluster, since it was provisioned **without** Traefik and Klipper.
+</Aside>
 
 ```yaml
 kubectl apply -f https://raw.githubusercontent.com/metallb/metallb/v0.14.3/config/manifests/metallb-native.yaml
@@ -197,13 +198,13 @@ spec:
 EOF
 ```
 
-
-> ️Replace the IP address pool range, in this case `192.168.1.240–192.168.1.250`, so it matches your environment. Ensure that the selected IP range belongs to the `vmbr0` interface network.
+<Aside type="note">
+Replace the IP address pool range, in this case `192.168.1.240–192.168.1.250`, so it matches your environment. Ensure that the selected IP range belongs to the `vmbr0` interface network.
+</Aside>
 
 5️⃣ Transform the cluster to a Management Cluster
 
 With clusterctl installed and prerequisites satisfied, run `clusterctl init` to convert your Kubernetes cluster into a management cluster.
-
 
 ```bash
 source capmox.env
@@ -213,13 +214,13 @@ clusterctl init \
   --ipam in-cluster \ 
   --control-plane kamaji
 ```
-
-
-> The command above will install [Cluster API Provider for Proxmox VE](https://github.com/ionos-cloud/cluster-api-provider-proxmox/) (CAPMOX) as infrastructure provider, Kubeadm as bootstrap provider and Kamaji as control-plane provider.
+<Aside type="note">
+The command above will install [Cluster API Provider for Proxmox VE](https://github.com/ionos-cloud/cluster-api-provider-proxmox/) (CAPMOX) as infrastructure provider, Kubeadm as bootstrap provider and Kamaji as control-plane provider.
+</Aside>
 
 ![](./medium-c780edb49580.png)
 
-## Creating a Cluster with the Kamaji CP Provider
+## Creating a Cluster with the Kamaji CP Provider
 
 When you use a `KamajiControlPlane` alongside your `Cluster` and `Machine` objects, the Kamaji control-plane provider watches for that resource and **spins up the Kubernetes control-plane components as Pods in your management cluster**. It provisions etcd, generates and rotates certificates, and configures the API server, controller-manager and scheduler according to the specs in the `KamajiControlPlane`. As Pod replicas become ready, Kamaji wires them into a highly available endpoint and exposes it (ClusterIP, LoadBalancer or NodePort), while your worker nodes simply run `kubeadm join` against that hosted control plane, giving you **a fully managed, multi-tenant control plane without requiring dedicated VMs**.
 
@@ -229,7 +230,6 @@ When you use a `KamajiControlPlane` alongside your `Cluster` and `Machine` objec
 1️⃣ Create Configuration for Kamaji
 
 Before creating a tenant Kubernetes cluster, some configuration is required on the management cluster for Kamaji. Create a a file named `kamaji.env`, and fill it in with the following content:
-
 
 ```bash
 # Cluster Configuration
@@ -268,14 +268,13 @@ export STORAGE_NODE="local-lvm"
 
 export CLOUD_INIT_CONFIG="#cloud-config package_update=true packages=- net-tools"
 ```
-
-
-> Replace `IP_RANGE`, `GATEWAY`, `DNS_SERVERS`, `NETWORK_BRIDGE`, `SSH_USER`, `SSH_AUTHORIZED_KEY`, `SOURCE_NODE`, `TEMPLATE_ID`, `ALLOWED_NODES` values and any other variable for that matter, so they match **your** environment.
+<Aside type="note">
+Replace `IP_RANGE`, `GATEWAY`, `DNS_SERVERS`, `NETWORK_BRIDGE`, `SSH_USER`, `SSH_AUTHORIZED_KEY`, `SOURCE_NODE`, `TEMPLATE_ID`, `ALLOWED_NODES` values and any other variable for that matter, so they match **your** environment.
+</Aside>  
 
 2️⃣ Generate the manifests
 
 Download the `capi-kamaji-proxmox-template.yaml` template file and save it in your working directory, then use the following commands to generate a cluster manifest from this template.
-
 
 ```bash
 source kamaji.dev 
@@ -284,7 +283,6 @@ clusterctl generate cluster $CLUSTER_NAME \
     --from capi-kamaji-proxmox-template.yaml \
     > capi-kamaji-proxmox-cluster.yaml
 ```
-
 
 3️⃣ Allow CAPMOX to over-commit memory ⚠️
 
@@ -298,9 +296,7 @@ schedulerHints:
     memoryAdjustment: 0
 ```
 
-
 For example:
-
 
 ```yaml
 apiVersion: infrastructure.cluster.x-k8s.io/v1alpha1
@@ -320,16 +316,13 @@ spec:
     memoryAdjustment: 0
 ```
 
-
 4️⃣ Create the cluster
 
 Execute the command:
 
-
 ```bash
 kubectl apply -f capi-kamaji-proxmox-cluster.yaml
 ```
-
 
 ![](./medium-4796dfacd3dd.png)
 \*The worker nodes are being provisioned in Proxmox.\*
@@ -352,8 +345,9 @@ kubectl --kubeconfig=./capi-kamaji-quickstart.kubeconfig \
   apply -f https://raw.githubusercontent.com/projectcalico/calico/v3.26.1/manifests/calico.yaml
 ```
 
-
-> *When issues arise, you can access any node directly by opening an SSH session as the* `root` *user. This allows you to inspect system logs, review configuration files, and run diagnostic commands on each machine.*
+<Aside type="tip">
+When issues arise, you can access any node directly by opening an SSH session as the* `root` *user. This allows you to inspect system logs, review configuration files, and run diagnostic commands on each machine.
+</Aside>
 
 ![](./medium-0053b9569ee6.png)
 \*The workload cluster is now ready for use!\*
@@ -381,11 +375,11 @@ data:
 EOF
 ```
 
-
-> Replace all values of the variables under the `data` stanza so they match **your** environment.
+<Aside type="note">
+Replace all values of the variables under the `data` stanza so they match **your** environment.
+</Aside>
 
 And then install the console via its Helm Chart:
-
 
 ```javascript
 helm repo add clastix https://clastix.github.io/charts
@@ -395,9 +389,5 @@ helm install console clastix/kamaji-console -n kamaji-system
 ```
 
 ![](./medium-694d6105f631.png)
-
-## Next Steps
-
-In the next article, we will explore how to use Kamaji together with tools such as [ArgoCD](https://argo-cd.readthedocs.io/en/stable/) and [Sveltos](https://sveltos.projectsveltos.io/) to take advantage of the automation capabilities provided by GitOps.
 
 Originally published on [Medium](https://medium.com/itnext/build-your-own-managed-kubernetes-service-on-proxmox-with-capi-and-kamaji-7858ad41cb09)
