@@ -1,0 +1,1 @@
+python3 scripts/localise-medium-images.py src/content/blog/managed-kubernetes-proxmox-capi/index.mdx
