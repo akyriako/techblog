@@ -12,15 +12,15 @@ heroImage:
   src: "./thumbnail.jpg"
 ---
 
+import { Aside } from 'astro-pure/user'
+
 ## What is CAPI?
 
 [Cluster API](https://github.com/kubernetes-sigs/cluster-api) (CAPI) is an open-source Kubernetes sub-project. Its goal is to bring Kubernetes-style, declarative APIs and controllers to the problem of bootstrapping, configuring, upgrading and operating entire Kubernetes clusters, treating clusters themselves (and the machines that compose them) as first-class Kubernetes resources rather than as external, manually-provisioned infrastructure.
 
 CAPI is deployed to a Kubernetes cluster, it leverages your familiar toolchain (kubectl, CRDs, manifests) to manage clusters at scale. When you request a new cluster, via a new custom resource named `Cluster`, a **provider-specific controller** provisions the necessary resources in the target infrastructure. As cluster demands change or when upgrades are required, simply updating the Kubernetes manifests and reapplying them triggers rolling updates or scale-out operations, all managed by the same reconciliation loops that govern standard Kubernetes workloads.
 
-
 ![](./medium-8c265b60d7a5.png)
-
 
 Adopting CAPI brings consistency and repeatability to cluster operations. Cluster operators can define golden-image references, networking topologies and scaling policies in version-controlled manifests. The reconciliation-driven approach ensures that drift is corrected automatically, while upgrade strategies (for example, in-place control-plane upgrades followed by a rolling reboot of worker nodes) can be codified and reused. This makes Cluster API especially valuable for organizations managing hundreds of clusters across multiple teams, regions or infrastructure providers, including public clouds and on-premises environments.
 
@@ -47,7 +47,9 @@ The reconciliation logic is split, abstracted and delegated into three **pluggab
 
 - **Infrastructure provider:** Talks to the target cloud or virtualization API (AWS, Azure, GCP, OpenStack, Proxmox, VMware etc.) to create and delete VMs, networks, load balancers and related resources.
 
-> You can find an indicative, but not extensive list, of the most common providers here: <https://image-builder.sigs.k8s.io/capi/capi#providers>
+  <Aside type="tip">
+  You can find an indicative, but not extensive list, of the most common providers here: https://image-builder.sigs.k8s.io/capi/capi#providers
+  </Aside>
 
 - **Bootstrap provider:** Prepares a newly-provisioned VM to become a Kubernetes Node: generating certs, initializing the control plane on the first Machine, and running `kubeadm join` on subsequent control-plane or worker Machines.
 - **ControlPlane provider:** Manages the lifecycle of control-plane Machines themselves (implementing rolling upgrades of API servers via e.g.`KubeadmControlPlane`).
@@ -108,24 +110,19 @@ cd image-builder/images/capi
 
 In order to install the dependencies automatically execute the following command:
 
-
 ```bash
 make deps
 ```
 
-
 This will install dependencies in the folder`image-builder/images/capi/.bin` (if they are not already on your system). Then you need to add that to your `PATH` environment variable before they can be used:
-
 
 ```bash
 export PATH=$PWD/.bin:$PATH
 ```
 
-
 3️⃣ Configure for Proxmox
 
 Add a new file at`image-builder/images/capi/packer/proxmox/.env` and provide the required environment variables, replacing with your own values where necessary:
-
 
 ```typescript
 export PROXMOX_URL="https://<PROXMOX_NODE_IP>:8006/api2/json"
@@ -143,53 +140,45 @@ export PROXMOX_BRIDGE="vmbr0"
 export PROXMOX_NIC_MODEL="virtio"
 ```
 
-
-```text
-# If you are working with OPNSense, image-builder is not 
-# assigning a Proxmox MAC address to the VM, and this seems 
-# to be an issue with DHCP in VXLANs controlled by OPNSense!
-# In theory you can configure your MTU and VLAN tag with the 
-# following variables. For the time being leave them commented.
-```
-
+<Aside type="caution">
+If you are working with OPNSense, image-builder is not 
+assigning a Proxmox MAC address to the VM, and this seems 
+to be an issue with DHCP in VXLANs controlled by OPNSense!
+In theory you can configure your MTU and VLAN tag with the 
+following variables. **For the time being leave them commented**:
 
 ```text
 # export PROXMOX_MTU="1450"
 # export PROXMOX_VLAN="23"
 ```
 
+Make sure you add the `.env` file in your `.gitignore` in order to avoid leaking API tokens when you commit the changes to your repo (if you have forked it in the first place).
+
+The environment variables `PROXMOX_ISO_POOL`, `PROXMOX_BRIDGE`,`PROXMOX_STORAGE_POOL` here are optional, just to demonstrate how to override the default values, because we might need to adjust some of them later on for a multi-node Proxmox cluster scenario.
+</Aside>
 
 ```text
 export PACKER_FLAGS="--var memory=2048 --var 'kubernetes_rpm_version=1.32.5' --var 'kubernetes_semver=v1.32.5' --var 'kubernetes_series=v1.32' --var 'kubernetes_deb_version=1.32.5-1.1'"
 ```
 
-
-> Make sure you add the `.env` file in your `.gitignore` in order to avoid leaking API tokens when you commit the changes to your repo (if you have forked it in the first place).
-> The environment variables `PROXMOX_ISO_POOL`, `PROXMOX_BRIDGE`,`PROXMOX_STORAGE_POOL` here are optional, just to demonstrate how to override the default values, because we might need to adjust some of them later on for a multi-node Proxmox cluster scenario.
-
 If you want to bake an image for a specific Kubernetes version (or pass specific variables to parameterize the baseline image) use the `PACKER_FLAGS` variable. You can omit altogether but I don’t recommend it until you fully grasp how image-builder utilizes Packer behind the scenes.
 
 4️⃣ Configure `PROXMOX_STORAGE_POOL` and `DISK_FORMAT`
-
-⚠️ *Very Important:*
 
 If you are running on a **single-node Proxmox** installation you need to set `PROXMOX_STORAGE_POOL` value to `local-lvm`. Consequently, because `local-lvm` is not accepting `qcow2` disk formats, you need to set `DISK_FORMAT` value to `raw`.
 
 If, on the other hand, you are running a **multi-node Proxmox cluster**, you need to set `PROXMOX_STORAGE_POOL` value as the name of a storage **that can be shared among nodes,** otherwise you will not be able to spin control-plane and worker nodes on other nodes than the one you uploaded your baseline image. In addition to that, you have to configure that very storage to accept `qcow2` format. Set `DISK_FORMAT` value to `qcow2`.
 
-📓 *A short side-note:*
-
+<Aside type="tip" title="A SHORT SIDE-QUEST">
 In my case, I run a [TrueNAS](https://www.truenas.com/) server as a virtual machine in one of the Proxmox nodes and I expose an NFS share which I add as storage in Proxmox (funny circle I know; performance is not great so I do recommend building an external NAS if you have the budget).
-
 
 ![](./medium-dd2b751ff910.png)
 
-
 Installing a separate TrueNAS, is an effort worth investing in, as you could externalize **all** the storage demands of **all** your Kubernetes clusters to TrueNAS by using [democratic-csi](https://github.com/democratic-csi/democratic-csi) as CSI (but this is way out of the scope of this article, maybe I will write it up in a separate article in the future).
-
 
 ![](./medium-41452d2a3986.png)
 
+</Aside>
 
 5️⃣ Adjust Packer Template
 
@@ -333,9 +322,11 @@ export NODE_REPLICAS=1
 export CLOUD_INIT_CONFIG="#cloud-config package_update=true packages=- net-tools"## -- Controller settings -- ##
 ```
 
+<Aside type="note">
+Replace all the `192.168.1.0/24` IP address with the CIDR that matches your the bridge interface`vmbr0`, or whichever bridge you chose to use for that matter.
 
-> Replace all the `192.168.1.0/24` IP address with the CIDR that matches your the bridge interface`vmbr0`, or whichever bridge you chose to use for that matter.
-> Replace all the values in placeholders with the ones corresponding in your lab.
+Replace all the values in placeholders with the ones corresponding in your lab.
+</Aside>
 
 ## Setting up a Management Cluster
 
@@ -376,8 +367,9 @@ You can find the kubeconfig of the newly created cluster under `/etc/rancher/k3s
 export KUBECONFIG=~/.kube/k3s.yaml
 ```
 
-
-> Make sure you change the server value from `https://127.0.0.1:6443` to the IP address assigned on the network device that uses the bridge `vmbr0`.
+<Aside type="note">
+Make sure you change the server value from `https://127.0.0.1:6443` to the IP address assigned on the network device that uses the bridge `vmbr0`.
+</Aside>
 
 2️⃣ Transform the cluster to a Management Cluster
 
@@ -388,14 +380,13 @@ With clusterctl installed and prerequisites satisfied, run `clusterctl init` to 
 source capmox.env
 ```
 
-
-> The command above will install [Cluster API Provider for Proxmox VE](https://github.com/ionos-cloud/cluster-api-provider-proxmox/) (CAPMOX) as infrastructure provider and Kubeadm as control-plane & bootstrap provider.
-
+<Aside type="note">
+The command above will install [Cluster API Provider for Proxmox VE](https://github.com/ionos-cloud/cluster-api-provider-proxmox/) (CAPMOX) as infrastructure provider and Kubeadm as control-plane & bootstrap provider.
+</Aside>
 
 ![](./medium-4d14d8672b59.png)
 
 *1. Infrastructure Provider (Proxmox) 2. Control-Plane Provider (Kubeadm) 3. Bootstrap Provider (Kubeadm)*
-
 
 ## Creating a Cluster with Kubeadm CP Provider
 
@@ -510,13 +501,14 @@ kubectl --kubeconfig=./capi-quickstart.kubeconfig \
 
 ![](./medium-6de7d86070a4.png)
 
-
-> When issues arise, you can access any node directly by opening an SSH session as the `root` user. This allows you to inspect system logs, review configuration files, and run diagnostic commands on each machine.
+<Aside type="tip">
+When issues arise, you can access any node directly by opening an SSH session as the `root` user. This allows you to inspect system logs, review configuration files, and run diagnostic commands on each machine.
+</Aside>
 
 ## Next Steps
 
-In the [next article](https://akyriako.medium.com/build-your-own-managed-kubernetes-service-on-proxmox-with-capi-and-kamaji-7858ad41cb09), we’ll explore how to leverage **Kamaji** to containerize the control plane of tenant clusters within the management cluster, leaving only the worker nodes running as virtual machines in Proxmox.
+In the [next article](/blog/managed-kubernetes-proxmox-capi-kamaji), we’ll explore how to leverage **Kamaji** to containerize the control plane of tenant clusters within the management cluster, leaving only the worker nodes running as virtual machines in Proxmox.
 
-Kamaji is an open-source operator developed by [Clastix](https://clastix.io/), which imagines the Kubernetes control plane as a hosted service **running entirely on Kubernetes** itself. Rather than provisioning dedicated virtual machines or bare-metal servers for etcd, kube-apiserver, controller manager and scheduler, Kamaji deploys those components as **Pods** inside the management cluster and presents them to tenant clusters via a lightweight API. This Hosted Control Plane pattern decouples control plane lifecycle from underlying infrastructure and dramatically reduces both operational overhead and resource duplication.
+[Kamaji](https://kamaji.clastix.io/) is an open-source operator developed by [Clastix](https://clastix.io/), which imagines the Kubernetes control plane as a hosted service **running entirely on Kubernetes** itself. Rather than provisioning dedicated virtual machines or bare-metal servers for etcd, kube-apiserver, controller manager and scheduler, Kamaji deploys those components as **Pods** inside the management cluster and presents them to tenant clusters via a lightweight API. This Hosted Control Plane pattern decouples control plane lifecycle from underlying infrastructure and dramatically reduces both operational overhead and resource duplication.
 
 Originally published on [Medium](https://medium.com/itnext/build-your-own-managed-kubernetes-service-on-proxmox-with-capi-8d9786644818)

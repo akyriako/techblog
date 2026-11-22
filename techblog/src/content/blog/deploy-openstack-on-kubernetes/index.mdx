@@ -8,8 +8,9 @@ tags:
   - cloud computing
   - digital sovereignty
   - cloud native
-language: 'English'
+# language: 'English'
 comment: false
+pin: true
 heroImage: { src: './thumbnail.png', color: '#D58388' }
 ---
 
@@ -19,7 +20,7 @@ import { GithubCard } from 'astro-pure/advanced'
 <Aside type="tip" title="TL;DR">
 Build a Kubernetes-native OpenStack cloud in under an hour using Proxmox, K3s, Ceph and OpenStack-Helm.
 
-Instead of manually assembling every [OpenStack](https://www.openstack.org/) moving part, we use a bunch of automation scripts to built around [K3s](https://k3s.io/), [Rook-Ceph](https://rook.io/), and > [OpenStack-Helm](https://github.com/openstack/openstack-helm) in order to deploy a fully functional OpenStack environment on a three-node Kubernetes cluster. Starting from a handful of virtual machines, we will bootstrap Kubernetes, provision distributed storage, prepare the networking stack, and deploy the OpenStack control plane and compute services with a series of repeatable, idempotent, scripted steps.
+Instead of manually assembling every [OpenStack](https://www.openstack.org/) moving part, we use a bunch of automation scripts to built around [K3s](https://k3s.io/), [Rook-Ceph](https://rook.io/), and [OpenStack-Helm](https://github.com/openstack/openstack-helm) in order to deploy a fully functional OpenStack environment on a three-node Kubernetes cluster. Starting from a handful of virtual machines, we will bootstrap Kubernetes, provision distributed storage, prepare the networking stack, and deploy the OpenStack control plane and compute services with a series of repeatable, idempotent, scripted steps.
  
 The result is not a toy deployment (not a production deployment though) or a collection of isolated services. By the end of the process, you will have a working OpenStack cloud with Keystone, Glance, Nova, Neutron, Cinder, Heat, Horizon, and Skyline running on Kubernetes, backed by Ceph storage and ready to launch networks & virtual machines for your homelab or your OpenStack development environment.
 </Aside>
