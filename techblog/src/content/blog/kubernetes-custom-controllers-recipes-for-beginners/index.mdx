@@ -1,0 +1,479 @@
+---
+title: Kubernetes Custom Controllers Recipes for Beginners
+description: Explaining the most common Kubernetes custom controllers development scenarios that can frustrate you as a beginner.
+publishDate: '2023-12-01'
+tags: 
+  - kubernetes
+  - controller-runtime
+  - golang
+  - kubebuilder
+  - recipes
+comment: false
+heroImage:
+  src: "./thumbnail.jpg"
+---
+
+import { Aside } from 'astro-pure/user'
+
+<Aside type="tip" title="TL;DR">
+Building Kubernetes custom controllers with **Go and Kubebuilder** is relatively straightforward. Figuring out all the little details that the documentation conveniently glosses over? That's where the fun begins.
+
+This article covers **eight practical recipes** for common controller development challenges: handling resource deletion, filtering reconciliation events with predicates, managing resource ownership, detecting third-party CRDs, recording Kubernetes events, working with Clientsets, identifying OpenShift clusters, and generating Kubernetes resources from YAML templates.
+
+Each recipe includes Go examples and practical explanations to help you avoid the usual beginner traps. Less time digging through `controller-runtime` source code, more time building controllers that actually behave themselves.
+</Aside>
+
+## Introduction
+
+Kubernetes custom controllers development is very hot topic at the moment. Alas, the documentation that you can find on the internet is rather limited to the [Kubebuilder](https://book.kubebuilder.io) and [Operator-SDK](https://sdk.operatorframework.io/docs/) manuals and two books (I am not going to advertise them here — Google is your friend) that they will only get you started in order to understand the very concept. Standarization of common patterns on the other hand is even more limited and many scenarios details are really well hidden inside the documentation or not even there at all. I compiled these recipes in this article in order to straighten up some topics you’ll definitely come across from your very first controller, and trust me you’re gonna lose plenty of time figuring out the small bits that make the difference. Last piece of advice, start developing your own controllers and when you get confident enough go and dissect controllers developed by big projects like Grafana, Prometheus, Loki, RabbitMq etc. which will teach you a lot of tricks you are probably not going to figure them out yourselves otherwise.
+
+## Recipe.1 — Handle resources marked for deletion
+
+`DeletionTimestamp` is an RFC 3339 date and time at which this `resource` is going to be deleted.
+
+```go
+const RFC3339 string = "2006-01-02T15:04:05Z07:00"
+```
+
+The value is set exclusively by Kubernetes, when a deletion is requested by the user, and cannot be set by a client. The `resource` is then expected to be deleted and not be visible by any client request, after this timepoint has passed and when the *finalizers* list is empty. If the finalizers list **still** contains items, the deletion is **blocked**. Once the value is set for this field, the value cannot be unset or reverted. In the reconciliation loop we can check whether `DeletionTimestamp` has a value and if yes, to exit the loop prematurely because the `resource` will no longer appear in any client request:
+
+```go
+ if resource.DeletionTimestamp != nil {
+  return ctrl.Result{}, nil
+ }
+```
+
+Alternatively you can check whether `DeletionTimestamp` is zero:
+
+```go
+if resource.DeletionTimestamp.IsZero() {
+ return ctrl.Result{}, nil
+}
+```
+
+<Aside type="note">
+`IsZero()` returns `true` if the value is `nil` or time is `zero`. I would recommend using the this approach.
+</Aside>
+
+## Recipe.2 — Filter reconciliation triggering events
+
+During the reconciliation loop, the controller is trying to reconcile (that’s why is called as well reconciliation loop) between the current state of the watched resource and its desired state — as described in the manifests. The event that triggered the reconciliation loop, is not passed down to the reconciler, that is forced to re-evaluate the state of the resource whose changes (in specs or status) triggered the event. This is a conscious choice, by design. This approach is known as *level-based (*the opposite approach is called *edge-based*). It basically derives from electronic circuit design, and essentially level-based triggering means receiving an event and reacting to *a state*, while edge-based means receiving an event and reacting to *state variations*.
+
+But what if we want to screen out and not re-evaluate the state for specific events or under specific circumstances or even if we want to handle individually the event(s) of different resources that we might be watching? We can do that with the help of event filters and the method `WithEventFilter`, which accepts a single argument, `predicate.Predicate`.
+
+```go
+type Predicate interface {
+  Create(event.CreateEvent) bool
+  Delete(event.DeleteEvent) bool
+  Update(event.UpdateEvent) bool
+  Generic(event.GenericEvent) bool
+}
+```
+
+The `WithEventFilter(p predicate.Predicate) bool` method sets via a predicate — a **predicate** is *a set of functions —*the event filters, that will screen which create/update/delete/generic events will eventually be allowed (or not — depends on the bool return value) to trigger reconciliations. In the example below the predicate is applied to **all** watched objects **without** exception.
+
+<Aside type="note">
+By default there are no event filters and all events lead to reconciliation.
+</Aside>
+
+```go
+var (
+ p = builder.WithPredicates(predicate.Funcs{
+  UpdateFunc: func(e event.UpdateEvent) bool {
+   // We only need to check generation changes here, because it is only
+   // updated on spec changes. On the other hand RevisionVersion
+   // changes also on status changes. We want to omit reconciliation
+   // for status updates.
+   return e.ObjectOld.GetGeneration() != e.ObjectNew.GetGeneration()
+  },
+  DeleteFunc: func(e event.DeleteEvent) bool {
+   // DeleteStateUnknown evaluates to false only if the object
+   // has been confirmed as deleted by the api server.
+   return !e.DeleteStateUnknown
+  },
+  CreateFunc: func(e event.CreateEvent) bool {
+   switch object := e.Object.(type) {
+   case *recipesv1alpha1.DemoCRD:
+    // Trigger the event only if the a DemoCRD was created and its 
+    // Deploy boolean field in the specs is true 
+    return object.Spec.Deploy
+   default:
+    return false
+   }
+  },
+ })
+)
+
+func (r *DemoReconciler) SetupWithManager(mgr ctrl.Manager) error {
+    return ctrl.NewControllerManagedBy(mgr).
+       For(&recipesv1alpha1.DemoCRD{}).
+       WithEventFilter(p).
+       Complete(r)
+}
+```
+
+As you can see with predicate we created we dialed down significantly the events that lead to reconciliation — that sometimes might be part of our function requirements. For example, with `UpdateFunc` we don’t let status updates to trigger a second consecutive reconciliation loop after we handled a reconciliation loop. With this tweak in `DeleteFunc` we do not let deleted objects to lead to unnecessary reconciliations and lastly with `CreateFunc` we can filter on CRD basis — in case we watch multiple resources — which one is allowed to trigger a reconciliation and under which circumstances.
+
+If now, we watch *multiple* resources and we want them to react differently, we can assign different predicate to each resource like this:
+
+```scss
+func (r *DemoReconciler) SetupWithManager(mgr ctrl.Manager) error {
+    return ctrl.NewControllerManagedBy(mgr).
+       For(&recipesv1alpha1.Demo1CRD{}, p1).
+       For(&recipesv1alpha1.Demo2CRD{}, p2).
+       Complete(r)
+}
+```
+
+<Aside type="note">
+Predicates are **not** necessary for all controllers, although filtering reduces the amount of noise to the API server. They are very useful for controllers that watch cluster-wide scoped resources.
+</Aside>
+
+## Recipe.3 — Bind resources through ownership
+
+You might create objects as part of your controller, which in turn create objects they depend on to fulfil the functionality of your operator. Hoarding objects in the cluster consumes unnecessary resources and it can degrade significantly the performance. For that reason, cleaning up your resources is crucial. Especially for internal resources, you need a way to associate your parent resources with their children (e.g a custom resource creates some pods, spins some jobs or creates a service). This is a very common pattern that can be fulfilled by setting an owner reference from the parent to the child object. **First** we create the owner reference from the parent to the child with `ctrl.SetControllerReference`:
+
+```go
+err = ctrl.SetControllerReference(demo, job, r.Scheme)
+  if err != nil {
+   logger.Error(err, "unable to set owner reference for job")
+   return nil, err
+  }
+```
+
+and **then** we create the child object:
+
+```go
+err = r.Create(ctx, job)
+  if err != nil {
+   logger.Error(err, "unable to create job")
+   return nil, err
+  }
+```
+
+<Aside type="note">
+The sequence is important, although it might strike odd at the first sight
+</Aside>
+
+## Recipe.4 — Check for 3rd party resource definitions
+
+There might be times, that our controller bases its full functionality on other components that we expect they are already installed on the target cluster — or otherwise we need to install them ourselves via the controller. One very common example is [Prometheus](https://prometheus.io). Many tools require the presence of Prometheus in order to self-configure themselves with the Prometheus endpoints. In order to find out if Prometheus is installed (and in extend **any** 3rd party component) we are going to use the package `k8s.io/apiextensions-apiserver/pkg/apis/apiextension`, which provides an API to register `CustomResourceDefinitions`, and we’re going to try to retrieve one of the Custom Resource Definitions that usually this package deploys on the cluster. In the case of Prometheus we are going to try to get the `CustomResourceDefinition` with the name `servicemonitors.monitoring.coreos.com`:
+
+```go
+import(
+  ...
+  "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions"
+  ...
+)
+
+func (r *DemoReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
+  ...
+  prometheusDeployed := r.IsDeployed(
+    ctx, 
+    "servicemonitors.monitoring.coreos.com"
+  )
+  ...
+}
+
+func (r *DemoReconciler) IsDeployed(ctx context.Context, name string) bool {
+  crd := &apiextensions.CustomResourceDefinition{}
+  err := r.Get(ctx, client.ObjectKey{Name: name}, crd)
+  return err == nil
+}
+```
+
+<Aside type="note">
+`client` refers to package `sigs.k8s.io/controller-runtime/pkg/client`, that normally would have been imported automatically and you don’t need to take any manual actions.
+</Aside>
+
+## Recipe.5 — Record events
+
+Kubernetes events are generated automatically in response to changes that take place on objects in a cluster, e.g., when a pod is created or a pod status transits to pending, successful, or failed. Events are not limited only to pods; every resource or custom resource can create its own events to signal Kubernetes and inform administrators about the changes happening to them or allow automated processes to respond to them.
+
+<Aside type="note">
+The events are stored in the Kubernetes store **for 1 hour by default**, but that can be changed by configuring the kube-apiserver.
+</Aside>
+
+In order to set up our reconciler to *record* events for the resources that watches, we need to add an additional field to its struct. Events are published from a controller using an `EventRecorder`:
+
+```csharp
+type DemoReconciler struct {
+ client.Client
+ Scheme *runtime.Scheme
+ Recorder record.EventRecorder
+}
+```
+
+The `EventRecorder` will be created by the manager and passed to the controller:
+
+```go
+mgr, err := ctrl.NewManager(ctrl.GetConfigOrDie(), ctrl.Options{...}
+...
+if err = (&controllers.DemoReconciler{
+  Client: mgr.GetClient(),
+  Scheme: mgr.GetScheme(),
+  Recorder: mgr.GetRecorder("demo-controller"),
+ }).SetupWithManager(mgr); err != nil {
+  setupLog.Error(err, "unable to create controller", "controller", "Demo")
+  os.Exit(1)
+ }
+```
+
+When and what event you are going to record depends exclusively on you and the functionality you want to create in your controller. An `Event` consists of 4 parameters: the `object` we want to record the event for, the `eventtype` which is a *string* that can be only `Normal` or `Warning`, the `reason` that is the very reason this event is generated (that should be short and unique with UpperCamelCase format) and the `message` which should be a human readable description of what happened.
+
+```go
+func (r *DemoReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
+  ...
+  r.Recorder.Event(resource, "Normal", "Created", fmt.Sprintf("Created %s/%s", resource.Namespace, resource.Name))
+  ...
+}
+```
+
+## Recipe.6 — Get a Kubernetes Clientset instance
+
+In order to create an instance of a `kubernetes.Clientset` you need to first to invoke `GetConfigOrDie` that creates a `*rest.Config` for talking to a Kubernetes apiserver.
+
+<Aside type="note">
+If kubeconfig is set, then it will use the kubeconfig file at that location. Otherwise will assume running in cluster and use the cluster provided kubeconfig. It will log an error and exit if there is an error creating the `rest.Config`
+</Aside>
+
+You will see, in many implementations (e.g of the manager — main.go in the operator-sdk), that people tend to use `ctrl.GetConfigOrDie()` — from the package: `sigs.k8s.io/controller-runtime` — when they need to initialize a new manager and assign a `client.Client` to the controller (and that isexactlywhat Operator-SDK and Kubebuilder do in their boilerplate code as best practice):
+
+```go
+mgr, err := ctrl.NewManager(ctrl.GetConfigOrDie(), ctrl.Options{...}
+...
+if err = (&controllers.DemoReconciler{
+  Client: mgr.GetClient(),
+  Scheme: mgr.GetScheme(),
+ }).SetupWithManager(mgr); err != nil {
+  setupLog.Error(err, "unable to create controller", "controller", "Demo")
+  os.Exit(1)
+ }
+```
+
+On the other hand, when they want to create a `kubernetes.Clientset`, there is a prevalent tendency in many implementations to create a `*rest.Config` by calling `config.GetConfigOrDie()` — by additionally importing: `sigs.k8s.io/controller-runtime/pkg/client/config`. **That makes zero sense when we are in the broader setting of a controller/manager, because the first method is an alias pointing to the same** `GetConfigOrDie()`**method as the second does**.
+
+There is no difference at all, you are just having an unnecessary import, while you could be using`ctrl.GetConfigOrDie()` for the second case as well:
+
+```go
+ import (
+  ...
+  "k8s.io/client-go/kubernetes"
+  ctrl "sigs.k8s.io/controller-runtime"
+  ...
+ )
+
+ cfg := ctrl.GetConfigOrDie()
+ mgr, err := ctrl.NewManager(cfg, ctrl.Options{...}
+
+ ...
+
+ clientSet, err := kubernetes.NewForConfig(cfg)
+ if err != nil {
+  setupLog.Error(err, "unable to create clientset", "controller", "Demo")
+  os.Exit(1)
+ }
+
+if err = (&controllers.DemoReconciler{
+  Client: mgr.GetClient(),
+  Scheme: mgr.GetScheme(),
+  ClientSet: clientSet,
+ }).SetupWithManager(mgr); err != nil {
+  setupLog.Error(err, "unable to create controller", "controller", "Demo")
+  os.Exit(1)
+ }
+```
+
+and we would need in that case to extend the reconciler’s struct as well:
+
+```go
+type DemoReconciler struct {
+ client.Client
+ Scheme *runtime.Scheme
+ ClientSet kubernetes.clientset
+}
+```
+
+## Recipe.7— Check if you’re running on Openshift
+
+We are going to import and use the package: `k8s.io/client-go/discovery`, which provides ways to discover server-supported API groups, versions and resources. In this case we want to figure out if there is an API group with the name `route.openshift.io`, which is a tell-tale that we are running on [OpenShift](https://www.redhat.com/en/technologies/cloud-computing/openshift).
+
+```go
+func (r *DemoReconciler) IsOpenShift() (bool, error) {
+ disco, err := discovery.NewDiscoveryClientForConfig(ctrl.GetConfigOrDie())
+ if err != nil {
+  return false, err
+ }
+
+ apiGroupList, err := disco.ServerGroups()
+ if err != nil {
+  return false, err
+ }
+
+ for _, apiGroup := range apiGroupList.Groups {
+  if apiGroup.Name == "route.openshift.io" {
+   return true, nil
+  }
+ }
+
+ return false, nil
+}
+```
+
+`NewDiscoveryClientForConfig` creates a new `DiscoveryClient` for the given kubeconfig (check Recipe. X if you need to refresh how to get an instance of kubeconfig). With this client we can then discover supported resources in the API server.
+
+<Aside type="note">
+Each `apiGroup` has a property `Versions` of type `[]GroupVersionForDiscovery` which you can use to further refine your search, in case there multiple API versions in that group.
+</Aside>
+
+## Recipe.8 — Create objects from templates
+
+We can create any Kubernetes object by using exclusively the Golang client and no manifest templates, but in my opinion for long and elaborate resources, that tends to get harder to read and maintain and eventually more error prone in the long run.
+
+An alternative though is to create a scaffold of the manifests in a template format that we could be able to parse in a Golang idiomatic way via the `text/template` package. For that matter we could save all the YAML manifests we are going to create from our controller as templates in a separate folder (for the sake of the example let’s call it`manifests`). For example let’s try to create a template for a Kubernetes Service:
+
+```yaml
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{.Name}}
+  namespace: {{.Namespace}}
+spec:
+  selector:
+    app: {{.Name}}
+  ports:
+    - protocol: TCP
+      port: {{.Port}}
+      targetPort: 80
+  type: ClusterIP
+```
+
+I usually create an `assets`package that uses the `embed` package to get a reference to the contents of `manifests`folder.
+
+```go
+package assets
+
+import (
+ ...
+ "embed"
+ ...
+ "text/template"
+)
+
+var (
+ //go:embed manifests/*
+ manifests embed.FS
+
+ appsScheme = runtime.NewScheme()
+ appsCodecs = serializer.NewCodecFactory(appsScheme)
+)
+```
+
+<Aside type="note">
+`NewCodecFactory` provides methods for retrieving serializers for the supported wire formats and conversion wrappers to define preferred internal and external versions. We need those serializers in order to unmarshal our YAML manifests to a `runtime.Object`.
+</Aside>
+
+First we need to be able to read this template from the file system and return in a form that `text/template` can work with:
+
+```go
+func getTemplate(name string) (*template.Template, error) {
+ manifestBytes, err := manifests.ReadFile(fmt.Sprintf("manifests/%s.yaml", name))
+ if err != nil {
+  return nil, err
+ }
+
+ tmp := template.New(name)
+ parse, err := tmp.Parse(string(manifestBytes))
+ if err != nil {
+  return nil, err
+ }
+
+ return parse, nil
+}
+```
+
+The we need to find a way to feed this template with the values (`metadata any` so we keep the whole thing quite flexible) that need to replace the placeholders and then deserialize the generated template to a `runtime.Object` with the help of `runtime.Decode` and the `appCodecs` we initialized before:
+
+```go
+func getObject(name string, gv schema.GroupVersion, metadata any) (runtime.Object, error) {
+ parse, err := getTemplate(name)
+ if err != nil {
+  return nil, err
+ }
+
+ var buffer bytes.Buffer
+ err = parse.Execute(&buffer, metadata)
+ if err != nil {
+  return nil, err
+ }
+
+ object, err := runtime.Decode(
+  appsCodecs.UniversalDecoder(gv),
+  buffer.Bytes(),
+ )
+
+ return object, nil
+}
+```
+
+Now we need to introduce a way to bind all that together. In order to pass the placeholder values as `metadata any`, we are going to instantiate an anonymous struct called `metadata` and we’ll set as fields the exact placeholders names we used in our YAML template (`Namespace`, `Name`, `Port`) and we pass it down the line:
+
+```go
+func getService(namespace string, name string, port int) (*corev1.Service, error) {
+ metadata := struct {
+  Namespace string
+  Name      string
+  Port      int
+ }{
+  Namespace: namespace,
+  Name:      name,
+  Port:      port,
+ }
+
+ object, err := getObject("service", corev1.SchemeGroupVersion, metadata)
+ if err != nil {
+  return nil, err
+ }
+
+ return object.(*corev1.Service), nil
+}
+```
+
+Next and final step is to cast the `runtime.Object` to `corev1.Service` and return it back to the reconciler to create this object.
+
+Last piece of the puzzle (which actually comes first in line) is to add to the `appScheme` we declared in our vars, **every** package that contains the Kubernetes objects we are going to deserialize from our YAML templates from. (this is the linking glue, if you forget to add the schemes here, your application will not be aware of the group versions).
+
+```go
+func init() {
+ if err := corev1.AddToScheme(appsScheme); err != nil {
+  panic(err)
+ }
+}
+```
+
+For small objects (like our Service example here), this technique is a bit tedious and over-engineered and doesn’t bring much value. But for example for long, elaborate manifests of complex deployments that need to be dynamically configured, this will declutter your code a lot and make it much more pleasant to read and maintain. For reference you can compare it with the equivalent declarative version:
+
+```go
+func getService(namespace string, name string, port int32) *corev1.Service {
+  service := &corev1.Service{
+    ObjectMeta: metav1.ObjectMeta{
+     Name:      name,
+     Namespace: namespace,
+    },
+    Spec: corev1.ServiceSpec{
+     Ports: []corev1.ServicePort{
+      {
+       Port:       port,
+       TargetPort: intstr.FromInt(80),
+       Protocol:   "TCP",
+      }},
+     Selector: map[string]string{"app": name},
+     Type:     "ClusterIP",
+    },
+   }
+  
+  return service
+}
+```
+
+Originally published on [Medium](https://medium.com/@akyriako/kubernetes-custom-controllers-recipes-for-beginners-bbc286c05ef8)
