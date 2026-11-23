@@ -6,15 +6,11 @@ COPY package.json bun.lock* ./
 RUN bun install --frozen-lockfile
 
 COPY . .
+
 RUN bun run build
 
-FROM nginxinc/nginx-unprivileged:alpine
+FROM nginx:alpine
 
-USER root
-RUN apk upgrade --no-cache
+COPY --from=builder /web/dist /usr/share/nginx/html
 
-COPY --from=builder --chown=101:101 /web/dist/ /usr/share/nginx/html/
-
-USER 101:101
-
-EXPOSE 8080
+EXPOSE 80
