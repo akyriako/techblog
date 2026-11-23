@@ -39,7 +39,7 @@ Every time someone complains about Medium, there's inevitably a well-meaning sug
 
 **Yes. For about three seconds.**
 
-Look, I'm sure Substack is lovely if your lifelong ambition is to become a writer (hahahahaha). But I don't want to. **I want to run a bloody blog.**
+Look, I'm sure Substack is lovely if your lifelong ambition is to become a *newsletter entrepreneur* (hahahahaha). But I don't want to. **I want to run a bloody blog.**
 
 I write technical articles about Kubernetes, Proxmox, OpenStack, and other infrastructure nonsense. I want people to find them when they're Googling an obscure error at 2 a.m., not receive a surprise essay in their inbox while they're trying to find a parcel delivery notification. I don't need subscribers, email campaigns, open rates, conversion funnels, or a weekly obligation to produce *content*. I'm not launching a media company. I'm documenting stuff I've built, broken, and occasionally managed to fix.
 
