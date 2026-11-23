@@ -328,6 +328,10 @@ Each `apiGroup` has a property `Versions` of type `[]GroupVersionForDiscovery` w
 
 ## Recipe.8 — Create objects from templates
 
+<Aside type="caution" title="YEAH, NAH. DON'T DO THAT.">
+This is a cool (ahem, questionable) party trick that's handy to know, but for the love of all things sane, please don't let me catch this lurking in a production codebase unless you've got a bloody good reason.
+</Aside>
+
 We can create any Kubernetes object by using exclusively the Golang client and no manifest templates, but in my opinion for long and elaborate resources, that tends to get harder to read and maintain and eventually more error prone in the long run.
 
 An alternative though is to create a scaffold of the manifests in a template format that we could be able to parse in a Golang idiomatic way via the `text/template` package. For that matter we could save all the YAML manifests we are going to create from our controller as templates in a separate folder (for the sake of the example let’s call it`manifests`). For example let’s try to create a template for a Kubernetes Service:
