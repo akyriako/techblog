@@ -97,7 +97,11 @@ If that helps someone build something, learn something, or avoid a particularly 
 
 So that's the story. Medium was an interesting side-quest. But I'm packing my shit and going home.
 
-Welcome to **The Backyard Rack**.
+Welcome to **The Backyard Rack**, where the content is written by an actual human, the sarcasm comes naturally and **absolutely none of the images are AI-generated**.
+
+Every pixel has been lovingly handcrafted by a team of highly trained graphic designers working out of my backyard shed.
+
+I will not be taking questions at this time.
 
 Now, if you'll excuse me, I've got a cluster that's been running suspiciously quietly for days...
 
