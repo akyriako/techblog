@@ -134,5 +134,12 @@ export default defineConfig({
     queuedRendering: {
       enabled: true
     }
-  }
+  },
+
+    vite: {
+    optimizeDeps: {
+      exclude: ['astro-pure'],
+    },
+  },
+
 })
